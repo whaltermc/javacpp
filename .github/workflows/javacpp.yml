@@ -13,11 +13,23 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: bytedeco/javacpp-presets/.github/actions/deploy-ubuntu@actions
+
+      # deploy-ubuntu runs `mvn clean install clean ...` (wipes target/)
+      # then `rm -Rf $(find .m2 -name '*SNAPSHOT*')` (wipes ~/.m2 install).
+      # Re-run `package` without the trailing clean so we have files to upload.
+      - name: Rebuild package for artifact upload
+        run: |
+          mvn package -B \
+            -Djavacpp.platform=android-arm64 \
+            -Djavacpp.platform.extension= \
+            $MAVEN_OPTIONS \
+            $CI_DEPLOY_OPTIONS
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: android-arm64-build
           path: |
-            **/target/*.jar
-            **/target/*.pom
-          if-no-files-found: warn
+            target/*.jar
+            target/*.zip
+          if-no-files-found: error
