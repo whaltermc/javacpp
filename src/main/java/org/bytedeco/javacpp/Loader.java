@@ -85,6 +85,42 @@ public class Loader {
     private static final String PLATFORM = Detector.getPlatform();
     private static final boolean WINDOWS = PLATFORM.startsWith("windows");
 
+    /** Returns true when running on Android/Dalvik or an Android-like JVM. */
+    private static boolean isAndroid() {
+        return PLATFORM.startsWith("android-") || System.getProperty("java.vm.name", "").toLowerCase().startsWith("dalvik");
+    }
+
+    /** Returns the Android ABI directory used by native libraries bundled in mods. */
+    private static String getAndroidAbi() {
+        if (!isAndroid()) {
+            return null;
+        }
+        try {
+            Class<?> build = Class.forName("android.os.Build");
+            String[] abis = (String[])build.getField("SUPPORTED_ABIS").get(null);
+            if (abis != null) {
+                for (String abi : abis) {
+                    if (abi != null && abi.length() > 0) {
+                        return abi;
+                    }
+                }
+            }
+        } catch (Throwable e) {
+            // Older Android versions may not expose SUPPORTED_ABIS.
+        }
+        String arch = System.getProperty("os.arch", "").toLowerCase();
+        if (arch.contains("aarch64") || arch.contains("arm64")) {
+            return "arm64-v8a";
+        } else if (arch.contains("x86_64") || arch.contains("amd64")) {
+            return "x86_64";
+        } else if (arch.contains("x86") || arch.contains("i686") || arch.contains("i386")) {
+            return "x86";
+        } else if (arch.startsWith("arm")) {
+            return "armeabi-v7a";
+        }
+        return null;
+    }
+
     /** Default platform properties loaded and returned by {@link #loadProperties()}. */
     private static Properties platformProperties = null;
     /** The stack of classes currently being loaded to support more than one class loader. */
@@ -951,7 +987,7 @@ public class Loader {
     static Map<String,String> loadedLibraries = new HashMap<String,String>();
     /** Will be set to false when symbolic link creation fails, such as on Windows.
      * Set via "org.bytedeco.javacpp.canCreateSymbolicLink" system property, defaults to false on Windows only. */
-    static boolean canCreateSymbolicLink = !WINDOWS;
+    static boolean canCreateSymbolicLink = !WINDOWS && !isAndroid();
     /** Default value for {@code load(..., pathsFirst)} set via "org.bytedeco.javacpp.pathsFirst" system property. */
     static boolean pathsFirst = false;
     /** Whether to extract libraries to {@link #cacheDir}, set via "org.bytedeco.javacpp.cacheLibraries" system property. */
@@ -964,7 +1000,7 @@ public class Loader {
         s = System.getProperty("org.bytedeco.javacpp.pathsFirst", s).toLowerCase();
         pathsFirst = s.equals("true") || s.equals("t") || s.equals("");
 
-        s = System.getProperty("org.bytedeco.javacpp.cancreatesymboliclink", WINDOWS ? "false" : "true").toLowerCase();
+        s = System.getProperty("org.bytedeco.javacpp.cancreatesymboliclink", WINDOWS || isAndroid() ? "false" : "true").toLowerCase();
         s = System.getProperty("org.bytedeco.javacpp.canCreateSymbolicLink", s).toLowerCase();
         canCreateSymbolicLink = s.equals("true") || s.equals("t") || s.equals("");
 
@@ -1000,48 +1036,24 @@ public class Loader {
         deleteDirectory(getCacheDir());
     }
 
-    /**
-     * Returns true when running inside Android on an ARM64 runtime.
-     * Android Java runtimes commonly report the OS as Linux, so checking
-     * os.name alone is not sufficient.
-     */
-    private static boolean isAndroidArm64() {
-        String arch = System.getProperty("os.arch", "").toLowerCase();
-        boolean android = false;
-        try {
-            Class.forName("android.os.Build");
-            android = true;
-        } catch (Throwable ignored) {
-        }
-        return android && (arch.equals("aarch64") || arch.equals("arm64"));
-    }
-
-    /** Returns Android's private application cache directory. */
-    private static File getAndroidCacheDir() {
-        try {
-            Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object application = activityThread.getMethod("currentApplication").invoke(null);
-            if (application != null) {
-                Object cacheDir = application.getClass().getMethod("getCacheDir").invoke(application);
-                if (cacheDir != null) {
-                    File dir = new File(cacheDir.toString());
-                    if ((dir.exists() || dir.mkdirs()) && dir.canRead() && dir.canWrite()) {
-                        return dir;
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        String tmp = System.getProperty("java.io.tmpdir");
-        return tmp != null ? new File(tmp) : new File(".");
-    }
-
-    /** Creates and returns the JavaCPP cache directory. On Android ARM64,
-     * the application's private cache directory is preferred. */
+    /** Creates and returns {@code System.getProperty("org.bytedeco.javacpp.cachedir")} or {@code ~/.javacpp/cache/} when not set. */
     public static File getCacheDir() throws IOException {
         if (cacheDir == null) {
-            String androidCache = isAndroidArm64()
-                    ? new File(getAndroidCacheDir(), "javacpp").getPath() : null;
+            String androidCache = null;
+            if (isAndroid()) {
+                try {
+                    Class<?> activityThread = Class.forName("android.app.ActivityThread");
+                    Object application = activityThread.getMethod("currentApplication").invoke(null);
+                    if (application != null) {
+                        Object cache = application.getClass().getMethod("getCacheDir").invoke(application);
+                        if (cache instanceof File) {
+                            androidCache = new File((File)cache, "javacpp").getPath();
+                        }
+                    }
+                } catch (Throwable e) {
+                    // Fall back to java.io.tmpdir below.
+                }
+            }
             String[] dirNames = {androidCache,
                                  System.getProperty("org.bytedeco.javacpp.cachedir"),
                                  System.getProperty("org.bytedeco.javacpp.cacheDir"),
@@ -1631,6 +1643,32 @@ public class Loader {
                     } catch (IOException | NoSuchFieldException | IllegalAccessException e) {
                         throw new RuntimeException(e);
                     }
+                // Flashback/Android mods commonly bundle native libraries as
+                // /lib/<ABI>/lib*.so instead of JavaCPP's usual
+                // /<platform>/lib*.so layout. Search that layout explicitly.
+                if (isAndroid()) {
+                    String abi = getAndroidAbi();
+                    if (abi != null) {
+                        try {
+                            URL u = findResource(cls, "/lib/" + abi + "/" + styles[i]);
+                            if (u != null) {
+                                if (reference) {
+                                    u = new URL(u + "#" + styles2[i]);
+                                    if (!u.toString().contains("#")) {
+                                        Field f = URL.class.getDeclaredField("ref");
+                                        f.setAccessible(true);
+                                        f.set(u, styles2[i]);
+                                    }
+                                }
+                                if (!urls.contains(u)) {
+                                    urls.add(u);
+                                }
+                            }
+                        } catch (IOException | NoSuchFieldException | IllegalAccessException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                }
                 }
             }
         }
@@ -1724,17 +1762,8 @@ public class Loader {
                 URI uri = url.toURI();
                 File file = null;
                 try {
-                    // On Android ARM64, always extract bundled native libraries
-                    // into the application's cache before calling System.load().
-                    if (isAndroidArm64()) {
-                        file = cacheResource(url, filename);
-                        if (logger.isDebugEnabled() && file != null) {
-                            logger.debug("Extracted Android native library " + url + " to " + file);
-                        }
-                    } else {
-                        // ... and if the URL is not already a file without fragments, etc ...
-                        file = new File(uri);
-                    }
+                    // ... and if the URL is not already a file without fragments, etc ...
+                    file = new File(uri);
                 } catch (Exception exc) {
                     // ... extract it from resources into the cache, if necessary ...
                     File f = cacheLibraries ? cacheResource(url, filename) : null;
