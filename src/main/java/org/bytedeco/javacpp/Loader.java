@@ -143,7 +143,19 @@ public class Loader {
             String osArch  = System.getProperty("os.arch", "").toLowerCase();
             String abiType = System.getProperty("sun.arch.abi", "").toLowerCase();
             String libPath = System.getProperty("sun.boot.library.path", "").toLowerCase();
-            if (jvmName.startsWith("dalvik") && osName.startsWith("linux")) {
+            boolean androidOs = false;
+            if (osName.startsWith("linux")) {
+                try {
+                    // android.os.Build exists on any Android OS install, regardless of
+                    // whether the JVM identifies itself as Dalvik/ART (e.g. embedded
+                    // desktop-JVM launchers like mjlaunch/PojavLauncher do not).
+                    Class.forName("android.os.Build");
+                    androidOs = true;
+                } catch (Throwable e) {
+                    // Not running on Android.
+                }
+            }
+            if ((jvmName.startsWith("dalvik") || androidOs) && osName.startsWith("linux")) {
                 osName = "android";
             } else if (jvmName.startsWith("robovm") && osName.startsWith("darwin")) {
                 osName = "ios";
@@ -1054,23 +1066,49 @@ public class Loader {
                     // Fall back to java.io.tmpdir below.
                 }
             }
+            String derivedInternalCache = null;
+            if (isAndroid()) {
+                // Embedded JVMs (mjlaunch/PojavLauncher) already have a working,
+                // executable, internal-storage native library dir on java.library.path
+                // (e.g. /data/user/0/<pkg>/cache/natives/...). Reuse its app-private
+                // root for our own cache instead of trusting user.home, which some of
+                // these launchers point at external storage -- and Android refuses to
+                // execute native code extracted onto external storage.
+                String libPath = System.getProperty("java.library.path", "");
+                for (String p : libPath.split(File.pathSeparator)) {
+                    if (p.contains("/data/user/") || p.contains("/data/data/")) {
+                        int cut = p.indexOf("/cache/");
+                        String root = cut >= 0 ? p.substring(0, cut + "/cache".length()) : p;
+                        derivedInternalCache = root + "/javacpp";
+                        break;
+                    }
+                }
+            }
             String[] dirNames = {androidCache,
                                  System.getProperty("org.bytedeco.javacpp.cachedir"),
                                  System.getProperty("org.bytedeco.javacpp.cacheDir"),
+                                 derivedInternalCache,
                                  System.getProperty("user.home") + "/.javacpp/cache/",
                                  System.getProperty("java.io.tmpdir") + "/.javacpp-" + System.getProperty("user.name") + "/cache/"};
             for (String dirName : dirNames) {
-                if (dirName != null) {
-                    File f = new File(dirName);
-                    try {
-                        if ((f.exists() || f.mkdirs()) && f.canRead() && f.canWrite() && f.canExecute()) {
-                            cacheDir = getCanonicalFile(f);
-                            break;
-                        }
-                    } catch (SecurityException e) {
-                        logger.warn("Could not access " + f + ": " + e.getMessage());
-                        // No access, try the next option.
+                if (dirName == null) {
+                    continue;
+                }
+                if (isAndroid() && (dirName.contains("/storage/emulated/") || dirName.contains("/Android/data/"))) {
+                    // Android will not dlopen() native libraries extracted onto
+                    // external storage -- skip candidates that resolve there.
+                    logger.warn("Skipping cache candidate on external storage (native code cannot execute there): " + dirName);
+                    continue;
+                }
+                File f = new File(dirName);
+                try {
+                    if ((f.exists() || f.mkdirs()) && f.canRead() && f.canWrite() && f.canExecute()) {
+                        cacheDir = getCanonicalFile(f);
+                        break;
                     }
+                } catch (SecurityException e) {
+                    logger.warn("Could not access " + f + ": " + e.getMessage());
+                    // No access, try the next option.
                 }
             }
         }
