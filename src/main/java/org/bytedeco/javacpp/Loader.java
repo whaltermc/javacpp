@@ -1000,10 +1000,50 @@ public class Loader {
         deleteDirectory(getCacheDir());
     }
 
-    /** Creates and returns {@code System.getProperty("org.bytedeco.javacpp.cachedir")} or {@code ~/.javacpp/cache/} when not set. */
+    /**
+     * Returns true when running inside Android on an ARM64 runtime.
+     * Android Java runtimes commonly report the OS as Linux, so checking
+     * os.name alone is not sufficient.
+     */
+    private static boolean isAndroidArm64() {
+        String arch = System.getProperty("os.arch", "").toLowerCase();
+        boolean android = false;
+        try {
+            Class.forName("android.os.Build");
+            android = true;
+        } catch (Throwable ignored) {
+        }
+        return android && (arch.equals("aarch64") || arch.equals("arm64"));
+    }
+
+    /** Returns Android's private application cache directory. */
+    private static File getAndroidCacheDir() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object application = activityThread.getMethod("currentApplication").invoke(null);
+            if (application != null) {
+                Object cacheDir = application.getClass().getMethod("getCacheDir").invoke(application);
+                if (cacheDir != null) {
+                    File dir = new File(cacheDir.toString());
+                    if ((dir.exists() || dir.mkdirs()) && dir.canRead() && dir.canWrite()) {
+                        return dir;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String tmp = System.getProperty("java.io.tmpdir");
+        return tmp != null ? new File(tmp) : new File(".");
+    }
+
+    /** Creates and returns the JavaCPP cache directory. On Android ARM64,
+     * the application's private cache directory is preferred. */
     public static File getCacheDir() throws IOException {
         if (cacheDir == null) {
-            String[] dirNames = {System.getProperty("org.bytedeco.javacpp.cachedir"),
+            String androidCache = isAndroidArm64()
+                    ? new File(getAndroidCacheDir(), "javacpp").getPath() : null;
+            String[] dirNames = {androidCache,
+                                 System.getProperty("org.bytedeco.javacpp.cachedir"),
                                  System.getProperty("org.bytedeco.javacpp.cacheDir"),
                                  System.getProperty("user.home") + "/.javacpp/cache/",
                                  System.getProperty("java.io.tmpdir") + "/.javacpp-" + System.getProperty("user.name") + "/cache/"};
@@ -1684,8 +1724,17 @@ public class Loader {
                 URI uri = url.toURI();
                 File file = null;
                 try {
-                    // ... and if the URL is not already a file without fragments, etc ...
-                    file = new File(uri);
+                    // On Android ARM64, always extract bundled native libraries
+                    // into the application's cache before calling System.load().
+                    if (isAndroidArm64()) {
+                        file = cacheResource(url, filename);
+                        if (logger.isDebugEnabled() && file != null) {
+                            logger.debug("Extracted Android native library " + url + " to " + file);
+                        }
+                    } else {
+                        // ... and if the URL is not already a file without fragments, etc ...
+                        file = new File(uri);
+                    }
                 } catch (Exception exc) {
                     // ... extract it from resources into the cache, if necessary ...
                     File f = cacheLibraries ? cacheResource(url, filename) : null;
