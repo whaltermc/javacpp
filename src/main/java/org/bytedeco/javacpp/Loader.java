@@ -145,14 +145,24 @@ public class Loader {
             String libPath = System.getProperty("sun.boot.library.path", "").toLowerCase();
             boolean androidOs = false;
             if (osName.startsWith("linux")) {
-                try {
-                    // android.os.Build exists on any Android OS install, regardless of
-                    // whether the JVM identifies itself as Dalvik/ART (e.g. embedded
-                    // desktop-JVM launchers like mjlaunch/PojavLauncher do not).
-                    Class.forName("android.os.Build");
+                // Detect the Android OS itself rather than relying on the JVM
+                // identifying as Dalvik/ART -- embedded desktop-JVM launchers
+                // (mjlaunch/PojavLauncher) run a real JVM on top of Android, so
+                // java.vm.name never says "dalvik" even though the OS is Android.
+                // These signals come from the OS/kernel, not from the mod's
+                // classloader, so they work even when android.os.Build isn't
+                // reachable via Class.forName() from this classloader.
+                if (System.getenv("ANDROID_ROOT") != null || System.getenv("ANDROID_DATA") != null
+                        || System.getenv("ANDROID_STORAGE") != null) {
                     androidOs = true;
-                } catch (Throwable e) {
-                    // Not running on Android.
+                } else if (new File("/system/build.prop").exists()) {
+                    androidOs = true;
+                } else {
+                    String libPath = System.getProperty("java.library.path", "");
+                    if (libPath.contains("/data/app/") || libPath.contains("/data/user/")
+                            || libPath.contains("/data/data/")) {
+                        androidOs = true;
+                    }
                 }
             }
             if ((jvmName.startsWith("dalvik") || androidOs) && osName.startsWith("linux")) {
