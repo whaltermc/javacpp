@@ -158,9 +158,9 @@ public class Loader {
                 } else if (new File("/system/build.prop").exists()) {
                     androidOs = true;
                 } else {
-                    String libPath = System.getProperty("java.library.path", "");
-                    if (libPath.contains("/data/app/") || libPath.contains("/data/user/")
-                            || libPath.contains("/data/data/")) {
+                    String androidLibPath = System.getProperty("java.library.path", "");
+                    if (androidLibPath.contains("/data/app/") || androidLibPath.contains("/data/user/")
+                            || androidLibPath.contains("/data/data/")) {
                         androidOs = true;
                     }
                 }
